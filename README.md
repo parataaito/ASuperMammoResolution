@@ -8,9 +8,9 @@ A collection of deep learning models for mammography image super-resolution usin
 
 ## Example Results
 
-![Super Resolution Example](docs/srgan_example.png)
+![Super Resolution Example](docs/results.png)
 
-*Left: Original high-resolution mammogram, Middle: Super-resolution result using SRGAN (50 epochs), Right: Low-resolution input after bicubic interpolation*
+*Left: Input Low Resolution mammogram, Top Left: Original High-resolution ground truth, Top Center: Low-resolution input after bicubic interpolation, Top Right: Super-resolution output using SRGAN*
 
 The example above demonstrates the model's ability to enhance low-resolution mammography images, recovering detailed tissue structures and improving image clarity.
 
