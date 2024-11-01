@@ -1,4 +1,13 @@
-# ASMR: A Super Mammography Resolution project
+<p align="center"><img align="center" width="280" src="docs/logo.png"/></p>
+<h1 align="center">ASMR: A Super Mammography Resolution project</h1>
+<hr>
+
+<p align="center">
+  <a href="https://skillicons.dev">
+    <img src="https://skillicons.dev/icons?i=python,pytorch,opencv" />
+  </a>
+</p>
+<hr>
 
 A collection of deep learning models for mammography image super-resolution using PyTorch Lightning. This repository implements multiple state-of-the-art super-resolution architectures:
 
