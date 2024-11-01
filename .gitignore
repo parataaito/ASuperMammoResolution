@@ -1,0 +1,7 @@
+venv
+/__pycache__/
+lightning_logs
+validation_examples*
+inference_data
+*.png
+*.ckpt
