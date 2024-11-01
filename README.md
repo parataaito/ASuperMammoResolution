@@ -124,6 +124,22 @@ The main dependencies are:
 
 For a complete list of dependencies, see [`requirements.txt`](requirements.txt).
 
+## Tested Configuration
+
+The models have been successfully trained and tested on the following system:
+
+### Hardware
+- **GPU**: NVIDIA RTX 3090 (16GB VRAM)
+- **CPU**: AMD Ryzen 7 5700X (8-Core)
+- **RAM**: 40GB DDR4
+- **OS**: Windows 11
+
+### Inference Performance
+With this configuration, for 1 image:
+- SRCNN: (not yet computed)
+- SRGAN: 32.5 ms
+- ESRGAN: 67.5 ms
+
 ## License
 
 [MIT Licence](LICENSE)

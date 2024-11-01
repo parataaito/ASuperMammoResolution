@@ -7,6 +7,7 @@ import argparse
 from tqdm import tqdm
 from esrgan import ESRGAN
 import torch.nn.functional as F
+import time
 
 def load_model(checkpoint_path):
     """Load the trained ESRGAN model"""
@@ -63,8 +64,13 @@ def main():
         output_path = os.path.join(args.output_dir, f"sr_{img_file}")
         
         # Process image
+        start = time.perf_counter()
         sr_image = process_image(model, input_path, output_path)
+        end = time.perf_counter()
         
+        time_ms = (end - start) * 1000
+        print(f"{time_ms} ms")
+                
         # Create comparison if requested
         if args.compare:
             # Load original image
