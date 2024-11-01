@@ -1,12 +1,11 @@
-<<<<<<< HEAD
 venv
 /__pycache__/
 lightning_logs
 validation_examples*
 inference_data
-*.png
+mammography_sr_dataset/**/*.png
 *.ckpt
-=======
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -169,4 +168,3 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
->>>>>>> cd18d21c9c3a259e7228c85a9fc485f3c23d1bd2
