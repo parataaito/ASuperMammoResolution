@@ -3,9 +3,9 @@ venv
 lightning_logs
 validation_examples*
 inference_data
-mammography_sr_dataset/**/*.png
+mammography_sr_dataset*/**/*.png
 *.ckpt
-
+*.zip
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
