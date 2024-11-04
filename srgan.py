@@ -36,7 +36,6 @@ class SRDataset(Dataset):
         
         return low_res, high_res
    
-   
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
         super().__init__()
@@ -86,11 +85,6 @@ class Generator(nn.Module):
             nn.Conv2d(64, 256, kernel_size=3, padding=1),
             nn.PixelShuffle(2),
             nn.PReLU(),
-            
-            # Third 2x upscale
-            nn.Conv2d(64, 256, kernel_size=3, padding=1),
-            nn.PixelShuffle(2),
-            nn.PReLU()
         )
         
         # Output convolution
@@ -137,7 +131,8 @@ class Discriminator(nn.Module):
 class SRGAN(pl.LightningModule):
     def __init__(self, lr: float = 1e-4):
         super().__init__()
-        self.automatic_optimization = False  # Disable automatic optimization
+        self.outputs = []
+        self.automatic_optimization = False
         
         self.generator = Generator()
         self.discriminator = Discriminator()
@@ -145,7 +140,6 @@ class SRGAN(pl.LightningModule):
         
         # Loss functions
         self.content_loss = nn.MSELoss()
-        self.adversarial_loss = nn.BCELoss()
         
         # MONAI perceptual loss
         self.perceptual_loss = monai.losses.PerceptualLoss(
@@ -159,30 +153,40 @@ class SRGAN(pl.LightningModule):
         self.content_weight = 1
         self.perceptual_weight = 0.1
         self.adversarial_weight = 0.001
+        
+        self.best_ssim = 0.0
+        self.best_psnr = 0.0
+        self.best_epoch = 0
 
     def forward(self, x):
         return self.generator(x)
 
-    def adversarial_criterion(self, pred, target_is_real):
-        target = torch.ones_like(pred) if target_is_real else torch.zeros_like(pred)
-        return self.adversarial_loss(pred, target)
+    def generator_adversarial_loss(self, discriminator_predictions):
+        # Add small epsilon to prevent log(0)
+        return -torch.mean(torch.log(discriminator_predictions + 1e-10))
+
+    def discriminator_adversarial_loss(self, real_preds, fake_preds):
+        # Add small epsilon to prevent log(0)
+        real_loss = -torch.mean(torch.log(real_preds + 1e-10))
+        fake_loss = -torch.mean(torch.log(1 - fake_preds + 1e-10))
+        return (real_loss + fake_loss) * 0.5
 
     def training_step(self, batch, batch_idx):
         opt_g, opt_d = self.optimizers()
         lr_imgs, hr_imgs = batch
                    
         # Train Generator
-        opt_g.zero_grad()
+        opt_g.zero_grad(set_to_none=True)
         
         # Generate SR images
         sr_imgs = self(lr_imgs)
             
-        gen_validity = self.discriminator(sr_imgs)
+        fake_preds_g = self.discriminator(sr_imgs)
         
         # Calculate generator losses
         content_loss = self.content_loss(sr_imgs, hr_imgs)
         perceptual_loss = self.perceptual_loss(sr_imgs, hr_imgs)
-        adversarial_loss = self.adversarial_criterion(gen_validity, True)
+        adversarial_loss = self.generator_adversarial_loss(fake_preds_g)
         
         gen_loss = (self.content_weight * content_loss + 
                    self.perceptual_weight * perceptual_loss +
@@ -191,18 +195,23 @@ class SRGAN(pl.LightningModule):
         self.manual_backward(gen_loss)
         opt_g.step()
         
+        # # Clear memory after generator update
+        # fake_preds_g = None
+        # gen_loss = None
+        
         # Train Discriminator
-        opt_d.zero_grad()
+        opt_d.zero_grad(set_to_none=True)
         
-        # Real loss
-        real_validity = self.discriminator(hr_imgs)
-        real_loss = self.adversarial_criterion(real_validity, True)
+        # Generate new SR images for discriminator training
+        with torch.no_grad():
+            sr_imgs_d = self(lr_imgs)
         
-        # Fake loss
-        fake_validity = self.discriminator(sr_imgs.detach())
-        fake_loss = self.adversarial_criterion(fake_validity, False)
+        # Get new predictions for discriminator training
+        real_preds = self.discriminator(hr_imgs)
+        fake_preds_d = self.discriminator(sr_imgs_d)  # No need for detach() since we used torch.no_grad()
         
-        d_loss = (real_loss + fake_loss) / 2
+        # Calculate discriminator loss
+        d_loss = self.discriminator_adversarial_loss(real_preds, fake_preds_d)
         
         self.manual_backward(d_loss)
         opt_d.step()
@@ -210,31 +219,120 @@ class SRGAN(pl.LightningModule):
         # Log losses
         self.log_dict({
             'g_loss': gen_loss,
+            'd_loss': d_loss,
             'content_loss': content_loss,
             'perceptual_loss': perceptual_loss,
             'adversarial_loss': adversarial_loss,
-            'd_loss': d_loss
-        })
+        }, prog_bar=True)
+
+    def calculate_ssim(self, img1, img2):
+        """
+        Calculate SSIM between two images
+        Args:
+            img1: First image tensor
+            img2: Second image tensor
+        Returns:
+            SSIM value
+        """
+        # Constants for numerical stability
+        C1 = (0.01 * 1.0) ** 2
+        C2 = (0.03 * 1.0) ** 2
+
+        # Compute means
+        mu1 = F.avg_pool2d(img1, kernel_size=11, stride=1, padding=5)
+        mu2 = F.avg_pool2d(img2, kernel_size=11, stride=1, padding=5)
+
+        # Compute squares of means
+        mu1_sq = mu1 ** 2
+        mu2_sq = mu2 ** 2
+        mu1_mu2 = mu1 * mu2
+
+        # Compute variances and covariance
+        sigma1_sq = F.avg_pool2d(img1 * img1, kernel_size=11, stride=1, padding=5) - mu1_sq
+        sigma2_sq = F.avg_pool2d(img2 * img2, kernel_size=11, stride=1, padding=5) - mu2_sq
+        sigma12 = F.avg_pool2d(img1 * img2, kernel_size=11, stride=1, padding=5) - mu1_mu2
+
+        # SSIM formula
+        numerator = (2 * mu1_mu2 + C1) * (2 * sigma12 + C2)
+        denominator = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+        ssim_map = numerator / denominator
+
+        # Return mean SSIM
+        return ssim_map.mean()
 
     def validation_step(self, batch, batch_idx):
         lr_imgs, hr_imgs = batch
-                    
-        sr_imgs = self(lr_imgs)
         
-        # print(f"LR shape: {lr_imgs.shape}")
-        # print(f"HR shape: {hr_imgs.shape}")
-        # print(f"SR shape: {sr_imgs.shape}")
+        # Generate SR images
+        with torch.no_grad():
+            sr_imgs = self(lr_imgs)
+            
+            # Get discriminator predictions
+            fake_preds = self.discriminator(sr_imgs)
+            real_preds = self.discriminator(hr_imgs)
 
-        content_loss = self.content_loss(sr_imgs, hr_imgs)
-        self.log('val_loss', content_loss)
+            # Calculate generator losses
+            content_loss = self.content_loss(sr_imgs, hr_imgs)
+            perceptual_loss = self.perceptual_loss(sr_imgs, hr_imgs)
+            adversarial_loss = self.generator_adversarial_loss(fake_preds)
+            
+            g_loss = (self.content_weight * content_loss + 
+                    self.perceptual_weight * perceptual_loss +
+                    self.adversarial_weight * adversarial_loss)
+
+            # Calculate discriminator loss
+            d_loss = self.discriminator_adversarial_loss(real_preds, fake_preds)
         
+        # Calculate metrics
+        with torch.no_grad():
+            # PSNR (Peak Signal-to-Noise Ratio)
+            mse = F.mse_loss(sr_imgs, hr_imgs)
+            psnr = 10 * torch.log10(1.0 / mse)
+            
+            # SSIM (Structural Similarity Index)
+            ssim_value = self.calculate_ssim(sr_imgs, hr_imgs)
+        
+        
+        self.log_dict({
+            'val/generator_loss': g_loss,
+            'val/discriminator_loss': d_loss,
+            'val/content_loss': content_loss,
+            'val/adversarial_loss': adversarial_loss,
+            'val/perceptual_loss': perceptual_loss,
+            'val/psnr': psnr,
+            'val/ssim': ssim_value
+        }, prog_bar=True, sync_dist=True)
+        
+        
+        # Save validation images periodically
         if batch_idx == 0 and (self.current_epoch + 1) % 10 == 0:
-            os.makedirs('validation_examples', exist_ok=True)
-            save_image(lr_imgs, f'validation_examples/epoch_{self.current_epoch+1}_low_res.png')
-            save_image(hr_imgs, f'validation_examples/epoch_{self.current_epoch+1}_high_res.png')
-            save_image(sr_imgs, f'validation_examples/epoch_{self.current_epoch+1}_super_res.png')
-
-        return content_loss
+            # Create validation directory if it doesn't exist
+            os.makedirs('validation_images', exist_ok=True)
+            
+            # Save grid of images (LR, SR, HR)
+            comparison = torch.cat([
+                F.interpolate(lr_imgs, size=hr_imgs.shape[-2:], mode='nearest'),
+                sr_imgs,
+                hr_imgs
+            ], dim=0)
+            
+            save_image(
+                comparison,
+                f'validation_images/epoch_{self.current_epoch+1}.png',
+                nrow=len(lr_imgs),
+                normalize=True
+            )
+            
+        # Store metrics for epoch end averaging
+        loss = {
+            'generator_loss': g_loss,
+            'psnr': psnr,
+            'ssim': ssim_value
+        }
+        
+        self.outputs.append(loss)
+        
+        return loss
 
     def configure_optimizers(self):
         opt_g = torch.optim.Adam(self.generator.parameters(), lr=self.lr)
@@ -242,6 +340,34 @@ class SRGAN(pl.LightningModule):
         
         return [opt_g, opt_d]
 
+    def on_validation_epoch_end(self):
+        # Stack all the metrics from validation steps
+        avg_gen_loss = torch.stack([x['generator_loss'] for x in self.outputs]).mean()
+        avg_psnr = torch.stack([x['psnr'] for x in self.outputs]).mean()
+        avg_ssim = torch.stack([x['ssim'] for x in self.outputs]).mean()
+        
+        # Update best metrics
+        if avg_ssim > self.best_ssim:
+            self.best_ssim = avg_ssim
+            self.best_psnr = avg_psnr
+            self.best_epoch = self.current_epoch
+        
+        # Log epoch-level metrics
+        self.log('val/epoch_generator_loss', avg_gen_loss)
+        self.log('val/epoch_psnr', avg_psnr)
+        self.log('val/epoch_ssim', avg_ssim)
+        
+        # Print summary with best results
+        print(f"\nValidation Epoch {self.current_epoch} Summary:")
+        print(f"Average Generator Loss: {avg_gen_loss:.4f}")
+        print(f"Average PSNR: {avg_psnr:.2f}")
+        print(f"Average SSIM: {avg_ssim:.4f}")
+        print("\nBest Results So Far:")
+        print(f"Best Epoch: {self.best_epoch}")
+        print(f"Best SSIM: {self.best_ssim:.4f}")
+        print(f"Best PSNR: {self.best_psnr:.2f}")
+        self.outputs.clear()  # free memory
+ 
 class SRDataModule(pl.LightningDataModule):
     def __init__(self, data_dir: str, batch_size: int = 32, num_workers: int = 4):
         super().__init__()
@@ -263,29 +389,38 @@ class SRDataModule(pl.LightningDataModule):
         return DataLoader(self.val_dataset, batch_size=self.batch_size, 
                          num_workers=self.num_workers)
 
-
 def train_srgan():
     model = SRGAN(lr=1e-4)
-    datamodule = SRDataModule('mammography_sr_dataset', batch_size=2)
+    datamodule = SRDataModule('mammography_sr_dataset_crop2', batch_size=8)
+    
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+        monitor='val/epoch_ssim',
+        filename='srgan-{epoch:02d}-ssim{val/epoch_ssim:.4f}',
+        save_top_k=1,  # Only save the best model
+        mode='max',
+    )
     
     trainer = pl.Trainer(
         max_epochs=1000,
         accelerator='auto',
         devices=1,
+        precision=16,
         callbacks=[
-            pl.callbacks.ModelCheckpoint(
-                monitor='val_loss',
-                filename='srgan-{epoch:02d}-{val_loss:.4f}',
-                save_top_k=1,
-                mode='min'
-            ),
-            # pl.callbacks.EarlyStopping(
-            #     monitor='val_loss',
-            #     patience=10,
-            #     mode='min'
-            # )
-        ]
+            checkpoint_callback,
+            pl.callbacks.LearningRateMonitor(logging_interval='epoch')
+        ],
+        logger=pl.loggers.TensorBoardLogger('logs', name='srgan_runs'),
+        log_every_n_steps=10,
+        check_val_every_n_epoch=1,
     )
+    
+    trainer.fit(model, datamodule)
+    
+    print("\nTraining Completed!")
+    print(f"Best model saved at: {checkpoint_callback.best_model_path}")
+    print(f"Best epoch: {model.best_epoch}")
+    print(f"Best SSIM: {model.best_ssim:.4f}")
+    print(f"Best PSNR: {model.best_psnr:.2f}")
     
     trainer.fit(model, datamodule)
 

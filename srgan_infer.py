@@ -36,7 +36,7 @@ def process_image(model, image_path, output_path):
 
 def main():
     parser = argparse.ArgumentParser(description='SRGAN Inference')
-    parser.add_argument('--checkpoint', '-p', type=str, default='best_models/srgan-epoch=81-val_loss=0.0003.ckpt',
+    parser.add_argument('--checkpoint', '-p', type=str, default='best_models/srgan-epoch=40-val_ssim=0.8946.ckpt',
                       help='Path to model checkpoint')
     parser.add_argument('--input_dir', '-i', type=str, default='inference_data/input',
                       help='Directory containing input images')
