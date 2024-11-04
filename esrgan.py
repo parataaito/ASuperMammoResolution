@@ -83,9 +83,6 @@ class RRDBNet(nn.Module):
             nn.LeakyReLU(0.2, True),
             nn.Conv2d(num_features, num_features * 4, 3, 1, 1),
             nn.PixelShuffle(2),
-            nn.LeakyReLU(0.2, True),
-            nn.Conv2d(num_features, num_features * 4, 3, 1, 1),
-            nn.PixelShuffle(2),
             nn.LeakyReLU(0.2, True)
         )
         
@@ -132,6 +129,7 @@ class Discriminator(nn.Module):
 class ESRGAN(pl.LightningModule):
     def __init__(self, lr: float = 1e-4):
         super().__init__()
+        self.outputs = []
         self.automatic_optimization = False
         
         self.generator = RRDBNet()
@@ -142,32 +140,59 @@ class ESRGAN(pl.LightningModule):
         self.l1_loss = nn.L1Loss()
         self.perceptual_loss = monai.losses.PerceptualLoss(
             spatial_dims=2,
-            network_type="squeeze",
+            network_type="vgg",
             is_fake_3d=False,
             pretrained=True
         )
+        self.adversarial_loss = nn.BCEWithLogitsLoss()
         
         # Loss weights
-        self.pixel_weight = 1
+        self.content_weight = 0.01
         self.perceptual_weight = 1
-        self.gan_weight = 0.1
+        self.adversarial_weight = 0.005 
+        
+        self.best_ssim = 0.0
+        self.best_psnr = 0.0
+        self.best_epoch = 0
 
     def forward(self, x):
         return self.generator(x)
 
-    def compute_gan_loss(self, real_pred, fake_pred):
-        # Relativistic average GAN loss
-        real_avg = real_pred - fake_pred.mean()
-        fake_avg = fake_pred - real_pred.mean()
+    def compute_discriminator_adversarial_loss(self, hr_logits, sr_logits):
+        """
+        Implements the relativistic average discriminator loss:
+        L_D^Ra = -E_xr[log(D_Ra(x_r, x_f))] - E_xf[log(1 - D_Ra(x_f, x_r))]
+        """
+        # Calculate relativistic average predictions
+        avg_fake = sr_logits.mean()
+        avg_real = hr_logits.mean()
         
-        loss_real = F.binary_cross_entropy_with_logits(
-            real_avg, torch.ones_like(real_avg)
-        )
-        loss_fake = F.binary_cross_entropy_with_logits(
-            fake_avg, torch.zeros_like(fake_avg)
-        )
+        D_Ra_real = torch.sigmoid(hr_logits - avg_fake)
+        D_Ra_fake = torch.sigmoid(sr_logits - avg_real)
         
-        return (loss_real + loss_fake) / 2
+        # Compute loss terms
+        real_loss = -torch.mean(torch.log(D_Ra_real + 1e-8))
+        fake_loss = -torch.mean(torch.log(1 - D_Ra_fake + 1e-8))
+        
+        return real_loss + fake_loss
+    
+    def compute_generator_adversarial_loss(self, hr_logits, sr_logits):
+        """
+        Implements the relativistic average generator loss:
+        L_G^Ra = -E_xr[log(1 - D_Ra(x_r, x_f))] - E_xf[log(D_Ra(x_f, x_r))]
+        """
+        # Calculate relativistic average predictions
+        avg_fake = sr_logits.mean()
+        avg_real = hr_logits.mean()
+        
+        D_Ra_real = torch.sigmoid(hr_logits - avg_fake)
+        D_Ra_fake = torch.sigmoid(sr_logits - avg_real)
+        
+        # Compute loss terms
+        real_loss = -torch.mean(torch.log(1 - D_Ra_real + 1e-8))
+        fake_loss = -torch.mean(torch.log(D_Ra_fake + 1e-8))
+        
+        return real_loss + fake_loss
 
     def training_step(self, batch, batch_idx):
         opt_g, opt_d = self.optimizers()
@@ -177,63 +202,183 @@ class ESRGAN(pl.LightningModule):
         opt_g.zero_grad()
         
         sr_imgs = self(lr_imgs)
-        real_pred = self.discriminator(hr_imgs)
-        fake_pred = self.discriminator(sr_imgs)
         
-        # Calculate losses
-        pixel_loss = self.l1_loss(sr_imgs, hr_imgs)
-        perceptual_loss = self.perceptual_loss(sr_imgs, hr_imgs)
-        gan_loss = self.compute_gan_loss(real_pred, fake_pred)
+        g_loss, content_loss, perceptual_loss, adversarial_loss = self.compute_generator_loss(hr_imgs, sr_imgs)
         
-        gen_loss = (self.pixel_weight * pixel_loss + 
-                   self.perceptual_weight * perceptual_loss +
-                   self.gan_weight * gan_loss)
-        
-        self.manual_backward(gen_loss)
+        self.manual_backward(g_loss)
         opt_g.step()
         
         # Train Discriminator
         opt_d.zero_grad()
         
-        real_pred = self.discriminator(hr_imgs)
-        fake_pred = self.discriminator(sr_imgs.detach())
-        
-        d_loss = self.compute_gan_loss(real_pred, fake_pred)
+        d_loss = self.compute_discriminator_loss(hr_imgs, sr_imgs)
         
         self.manual_backward(d_loss)
         opt_d.step()
         
         # Log losses
         self.log_dict({
-            'g_loss': gen_loss,
-            'pixel_loss': pixel_loss,
-            'perceptual_loss': perceptual_loss,
-            'gan_loss': gan_loss,
-            'd_loss': d_loss
-        })
+            'g_loss': g_loss,
+            'd_loss': d_loss,
+            'content_loss': content_loss,
+            'adversarial_loss': adversarial_loss,
+            'perceptual_loss': perceptual_loss
+        }, prog_bar=True)
+
+    def compute_discriminator_loss(self, hr_imgs, sr_imgs):
+        hr_logits = self.discriminator(hr_imgs)
+        sr_logits = self.discriminator(sr_imgs.detach())
+        
+        d_loss = self.compute_discriminator_adversarial_loss(hr_logits, sr_logits)
+        return d_loss
+
+    def compute_generator_loss(self, hr_imgs, sr_imgs):
+        hr_logits = self.discriminator(hr_imgs)
+        sr_logits = self.discriminator(sr_imgs)
+        
+        # Calculate losses
+        content_loss = self.l1_loss(sr_imgs, hr_imgs)
+        perceptual_loss = self.perceptual_loss(sr_imgs, hr_imgs)
+        adversarial_loss = self.compute_generator_adversarial_loss(hr_logits, sr_logits)
+        
+        g_loss = (self.content_weight * content_loss + 
+                   self.perceptual_weight * perceptual_loss +
+                   self.adversarial_weight * adversarial_loss)
+                   
+        return g_loss, content_loss, perceptual_loss, adversarial_loss
+
+    def calculate_ssim(self, img1, img2):
+        """
+        Calculate SSIM between two images
+        Args:
+            img1: First image tensor
+            img2: Second image tensor
+        Returns:
+            SSIM value
+        """
+        # Constants for numerical stability
+        C1 = (0.01 * 1.0) ** 2
+        C2 = (0.03 * 1.0) ** 2
+
+        # Compute means
+        mu1 = F.avg_pool2d(img1, kernel_size=11, stride=1, padding=5)
+        mu2 = F.avg_pool2d(img2, kernel_size=11, stride=1, padding=5)
+
+        # Compute squares of means
+        mu1_sq = mu1 ** 2
+        mu2_sq = mu2 ** 2
+        mu1_mu2 = mu1 * mu2
+
+        # Compute variances and covariance
+        sigma1_sq = F.avg_pool2d(img1 * img1, kernel_size=11, stride=1, padding=5) - mu1_sq
+        sigma2_sq = F.avg_pool2d(img2 * img2, kernel_size=11, stride=1, padding=5) - mu2_sq
+        sigma12 = F.avg_pool2d(img1 * img2, kernel_size=11, stride=1, padding=5) - mu1_mu2
+
+        # SSIM formula
+        numerator = (2 * mu1_mu2 + C1) * (2 * sigma12 + C2)
+        denominator = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+        ssim_map = numerator / denominator
+
+        # Return mean SSIM
+        return ssim_map.mean()
 
     def validation_step(self, batch, batch_idx):
         lr_imgs, hr_imgs = batch
-        sr_imgs = self(lr_imgs)
         
-        val_loss = self.l1_loss(sr_imgs, hr_imgs)
-        self.log('val_loss', val_loss)
-        
-        if batch_idx == 0 and (self.current_epoch + 1) % 10 == 0:
-            os.makedirs('validation_examples', exist_ok=True)
-            save_image(lr_imgs, f'validation_examples/epoch_{self.current_epoch+1}_low_res.png')
-            save_image(hr_imgs, f'validation_examples/epoch_{self.current_epoch+1}_high_res.png')
-            save_image(sr_imgs, f'validation_examples/epoch_{self.current_epoch+1}_super_res.png')
+        # Generate SR images
+        with torch.no_grad():
+            sr_imgs = self(lr_imgs)
             
-        return val_loss
+            # Calculate losses
+            g_loss, content_loss, perceptual_loss, adversarial_loss = self.compute_generator_loss(hr_imgs, sr_imgs)
+            d_loss = self.compute_discriminator_loss(hr_imgs, sr_imgs)
 
+
+        # Calculate metrics
+        with torch.no_grad():
+            # PSNR (Peak Signal-to-Noise Ratio)
+            mse = F.mse_loss(sr_imgs, hr_imgs)
+            psnr = 10 * torch.log10(1.0 / mse)
+            
+            # SSIM (Structural Similarity Index)
+            ssim_value = self.calculate_ssim(sr_imgs, hr_imgs)        
+        
+        # Log validation metrics
+        self.log_dict({
+            'val/generator_loss': g_loss,
+            'val/discriminator_loss': d_loss,
+            'val/content_loss': content_loss,
+            'val/adversarial_loss': adversarial_loss,
+            'val/perceptual_loss': perceptual_loss,
+            'val/psnr': psnr,
+            'val/ssim': ssim_value
+        }, prog_bar=True, sync_dist=True)
+        
+        # Save validation images periodically
+        if batch_idx == 0 and (self.current_epoch + 1) % 10 == 0:
+            # Create validation directory if it doesn't exist
+            os.makedirs('validation_images', exist_ok=True)
+            
+            # Save grid of images (LR, SR, HR)
+            comparison = torch.cat([
+                F.interpolate(lr_imgs, size=hr_imgs.shape[-2:], mode='nearest'),
+                sr_imgs,
+                hr_imgs
+            ], dim=0)
+            
+            save_image(
+                comparison,
+                f'validation_images/epoch_{self.current_epoch+1}.png',
+                nrow=len(lr_imgs),
+                normalize=True
+            )
+            
+        # Store metrics for epoch end averaging
+        loss = {
+            'generator_loss': g_loss,
+            'psnr': psnr,
+            'ssim': ssim_value
+        }
+        
+        self.outputs.append(loss)
+
+        return loss
+
+    def on_validation_epoch_end(self):
+        # Stack all the metrics from validation steps
+        avg_gen_loss = torch.stack([x['generator_loss'] for x in self.outputs]).mean()
+        avg_psnr = torch.stack([x['psnr'] for x in self.outputs]).mean()
+        avg_ssim = torch.stack([x['ssim'] for x in self.outputs]).mean()
+        
+        # Update best metrics
+        if avg_ssim > self.best_ssim:
+            self.best_ssim = avg_ssim
+            self.best_psnr = avg_psnr
+            self.best_epoch = self.current_epoch
+        
+        # Log epoch-level metrics
+        self.log('val/epoch_generator_loss', avg_gen_loss)
+        self.log('val/epoch_psnr', avg_psnr)
+        self.log('val/epoch_ssim', avg_ssim)
+        
+        # Print summary with best results
+        print(f"\nValidation Epoch {self.current_epoch} Summary:")
+        print(f"Average Generator Loss: {avg_gen_loss:.4f}")
+        print(f"Average PSNR: {avg_psnr:.2f}")
+        print(f"Average SSIM: {avg_ssim:.4f}")
+        print("\nBest Results So Far:")
+        print(f"Best Epoch: {self.best_epoch}")
+        print(f"Best SSIM: {self.best_ssim:.4f}")
+        print(f"Best PSNR: {self.best_psnr:.2f}")
+        self.outputs.clear()  # free memory
+ 
     def configure_optimizers(self):
-        opt_g = torch.optim.Adam(self.generator.parameters(), lr=self.lr, betas=(0.9, 0.99))
-        opt_d = torch.optim.Adam(self.discriminator.parameters(), lr=self.lr, betas=(0.9, 0.99))
+        opt_g = torch.optim.Adam(self.generator.parameters(), lr=self.lr, betas=(0.9, 0.999))
+        opt_d = torch.optim.Adam(self.discriminator.parameters(), lr=self.lr, betas=(0.9, 0.999))
         return [opt_g, opt_d]
 
 class SRDataModule(pl.LightningDataModule):
-    def __init__(self, data_dir: str, batch_size: int = 32, num_workers: int = 4):
+    def __init__(self, data_dir: str, batch_size: int = 32, num_workers: int = 11):
         super().__init__()
         self.data_dir = data_dir
         self.batch_size = batch_size
@@ -255,23 +400,36 @@ class SRDataModule(pl.LightningDataModule):
 
 def train_esrgan():
     model = ESRGAN(lr=1e-4)
-    datamodule = SRDataModule('mammography_sr_dataset', batch_size=1)
+    datamodule = SRDataModule('mammography_sr_dataset_crop', batch_size=1)
+    
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+        monitor='val/epoch_ssim',
+        filename='esrgan-{epoch:02d}-ssim{val/epoch_ssim:.4f}',
+        save_top_k=1,  # Only save the best model
+        mode='max',
+    )
     
     trainer = pl.Trainer(
         max_epochs=1000,
         accelerator='auto',
         devices=1,
+        precision=16,
         callbacks=[
-            pl.callbacks.ModelCheckpoint(
-                monitor='val_loss',
-                filename='esrgan-{epoch:02d}-{val_loss:.4f}',
-                save_top_k=1,
-                mode='min'
-            )
-        ]
+            checkpoint_callback,
+            pl.callbacks.LearningRateMonitor(logging_interval='epoch')
+        ],
+        logger=pl.loggers.TensorBoardLogger('logs', name='esrgan_runs'),
+        log_every_n_steps=10,
+        check_val_every_n_epoch=1,
     )
     
     trainer.fit(model, datamodule)
+    
+    print("\nTraining Completed!")
+    print(f"Best model saved at: {checkpoint_callback.best_model_path}")
+    print(f"Best epoch: {model.best_epoch}")
+    print(f"Best SSIM: {model.best_ssim:.4f}")
+    print(f"Best PSNR: {model.best_psnr:.2f}")
 
 if __name__ == "__main__":
     train_esrgan()
