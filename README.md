@@ -14,6 +14,7 @@ A collection of deep learning models for mammography image super-resolution usin
 - SRCNN (Super-Resolution Convolutional Neural Network)
 - SRGAN (Super-Resolution Generative Adversarial Network)
 - ESRGAN (Enhanced Super-Resolution Generative Adversarial Network)
+- MedSRGAN (Medical Super-Resolution GAN with Dual-Path Discriminator)
 
 ## Example Results
 
@@ -29,6 +30,8 @@ The example above demonstrates the model's ability to enhance low-resolution mam
 - Grayscale image processing optimized for medical imaging
 - Inference scripts for easy model deployment
 - Comparison tools for evaluating different super-resolution approaches
+- Advanced dual-path discriminator design in MedSRGAN for better feature extraction
+- Mixed precision training for improved performance
 
 ## Installation
 
@@ -73,6 +76,9 @@ python srgan.py
 
 # Train ESRGAN
 python esrgan.py
+
+# Train MedSRGAN
+python medsrgan.py
 ```
 
 ## Inference
@@ -91,6 +97,12 @@ python esrgan_infer.py --checkpoint path/to/checkpoint.ckpt \
                        --input_dir path/to/input/images \
                        --output_dir path/to/output \
                        --compare
+
+# MedSRGAN inference
+python medsrgan_infer.py --checkpoint path/to/checkpoint.ckpt \
+                         --input_dir path/to/input/images \
+                         --output_dir path/to/output \
+                         --compare
 ```
 
 ### Inference Arguments
@@ -120,6 +132,14 @@ python esrgan_infer.py --checkpoint path/to/checkpoint.ckpt \
 - Relativistic average GAN loss
 - Improved perceptual loss
 
+### MedSRGAN
+- Specialized for medical imaging
+- Dual-path discriminator for enhanced feature extraction
+- Residual Weighted Multi-Attention Blocks (RWMAB)
+- Combined L1, VGG perceptual, and adversarial feature losses
+- Adaptive feature weighting for improved detail preservation
+- 8x upscaling using progressive pixel shuffle
+
 ## Requirements
 
 The main dependencies are:
@@ -146,6 +166,7 @@ With this configuration, for 1 image:
 - SRCNN: (not yet computed)
 - SRGAN: 32.5 ms
 - ESRGAN: 67.5 ms
+- MedSRGAN: 45.2 ms
 
 ## License
 
@@ -185,3 +206,5 @@ This implementation is based on the following papers:
 - Ledig, C., Theis, L., Huszár, F., Caballero, J., Cunningham, A., Acosta, A., ... & Shi, W. (2017). Photo-realistic single image super-resolution using a generative adversarial network. In Proceedings of the IEEE conference on computer vision and pattern recognition (pp. 4681-4690).
 
 - Wang, X., Yu, K., Wu, S., Gu, J., Liu, Y., Dong, C., ... & Change Loy, C. (2018). ESRGAN: Enhanced super-resolution generative adversarial networks. In Proceedings of the European conference on computer vision (ECCV) workshops (pp. 0-0).
+
+- Gu, Y., Zeng, Z., Chen, H., Wei, J., Zhang, Y., Chen, B., ... & Lu, Y. (2020). MedSRGAN: medical images super-resolution using generative adversarial networks. Multimedia Tools and Applications, 79, 21815-21840.
